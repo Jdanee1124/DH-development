@@ -14,7 +14,7 @@ DIAVision 平台的大华工业相机采集算子插件，支持 GigE / USB3 Vis
 
 - .NET 8.0
 - DIAVision 1.6.x（需提供 `DIAVision.Core.dll`）
-- 大华工业相机 SDK（`MVSDKmd.dll` 等原生库，已包含在 `references/Dahua/` 中）
+- 大华工业相机 SDK（`MVSDKmd.dll` 等原生库，需安装大华 MV Viewer 后复制到 `references/Dahua/`）
 
 ## 项目结构
 
@@ -75,5 +75,5 @@ DahuaGrab.json
 
 | 依赖 | 说明 |
 |------|------|
-| 大华工业相机 SDK | 原生库 `MVSDKmd.dll`，已随项目提供 |
+| 大华工业相机 SDK | 原生库 `MVSDKmd.dll`，需安装 [大华MV Viewer](https://www.dahuatech.com/) 后复制到 `references/Dahua/` |
 | DIAVision.Core | 台达视觉平台核心库（闭源） |
