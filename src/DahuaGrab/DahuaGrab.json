@@ -1,0 +1,7 @@
+{
+    "typeNames": ["DahuaGrab.DahuaGrab"],
+    "assemblyFileNames": ["DahuaGrab.dll"],
+    "IsSupportedWinX64": true,
+    "IsSupportedLinuxX64": true,
+    "IsSupportedLinuxArm64": true
+}
