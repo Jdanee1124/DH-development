@@ -1,4 +1,7 @@
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using CameraSDK;
 using CameraSDK.Enums;
 using CameraSDK.Exceptions;
@@ -12,12 +15,17 @@ namespace DahuaGrab
         private bool _disposed;
         private DeviceState _state = DeviceState.Disconnected;
         private readonly object _lock = new();
+        private CancellationTokenSource? _grabCts;
+        private Task? _grabTask;
 
         public string Name { get; }
         public string SerialNumber { get; }
         public string VendorName { get; }
         public DeviceState State => _state;
         public bool IsOpen => _isOpen;
+
+        public event Action<ImageData>? OnFrameCaptured;
+        public event Action<string, Exception>? OnError;
 
         public double Exposure { get => GetDouble("ExposureTime"); set => SetDouble("ExposureTime", value); }
         public double ExposureMin => GetDoubleMin("ExposureTime");
@@ -60,28 +68,40 @@ namespace DahuaGrab
             if (_disposed) throw new ObjectDisposedException(nameof(DahuaCamera));
             if (_isOpen) return true;
 
-            lock (_lock)
+            return RetryHelper.RetryAction(() =>
             {
-                int ret = DahuaInterop.IMV_OpenDev(_handle);
-                if (ret != (int)DahuaInterop.IMV_OK)
-                    throw new CameraException($"打开相机失败: 0x{ret:X8}", ret);
+                lock (_lock)
+                {
+                    CameraLogger.Info(nameof(DahuaCamera), $"正在打开相机 {SerialNumber}...");
+                    int ret = DahuaInterop.IMV_OpenDev(_handle);
+                    if (ret != (int)DahuaInterop.IMV_OK)
+                        throw new CameraException($"打开相机失败: 0x{ret:X8}", ret);
 
-                _isOpen = true;
-                _state = DeviceState.Connected;
-                return true;
-            }
+                    _isOpen = true;
+                    _state = DeviceState.Connected;
+                    CameraLogger.Info(nameof(DahuaCamera), $"相机 {SerialNumber} 已打开");
+                }
+            }, maxRetries: 3, baseDelayMs: 500, source: nameof(DahuaCamera));
         }
 
         public void Close()
         {
             if (!_isOpen || _disposed) return;
 
+            try
+            {
+                StopContinuousGrab();
+            }
+            catch { }
+
             lock (_lock)
             {
+                CameraLogger.Info(nameof(DahuaCamera), $"正在关闭相机 {SerialNumber}...");
                 DahuaInterop.IMV_StopGrabbing(_handle);
                 DahuaInterop.IMV_CloseDev(_handle);
                 _isOpen = false;
                 _state = DeviceState.Disconnected;
+                CameraLogger.Info(nameof(DahuaCamera), $"相机 {SerialNumber} 已关闭");
             }
         }
 
@@ -126,6 +146,177 @@ namespace DahuaGrab
             return true;
         }
 
+        public bool StartContinuousGrab(int intervalMs = 100, CancellationToken? cancellationToken = null)
+        {
+            if (!_isOpen) throw new CameraException("相机未打开");
+
+            StopContinuousGrab();
+
+            _grabCts = cancellationToken != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken.Value)
+                : new CancellationTokenSource();
+
+            var token = _grabCts.Token;
+
+            _grabTask = Task.Run(async () =>
+            {
+                CameraLogger.Info(nameof(DahuaCamera), $"开始连续采集，间隔 {intervalMs}ms");
+
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        if (GrabOneInternal(out ImageData frame, 5000))
+                        {
+                            try
+                            {
+                                OnFrameCaptured?.Invoke(frame);
+                            }
+                            finally
+                            {
+                                DahuaInterop.IMV_ReleaseImage(_handle, ref frame);
+                            }
+                        }
+
+                        await Task.Delay(intervalMs, token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        CameraLogger.Error(nameof(DahuaCamera), "连续采集出错", ex);
+                        OnError?.Invoke("连续采集出错", ex);
+                        await Task.Delay(1000, token);
+                    }
+                }
+
+                CameraLogger.Info(nameof(DahuaCamera), "连续采集已停止");
+            }, token);
+
+            _state = DeviceState.Grabbing;
+            return true;
+        }
+
+        public void StopContinuousGrab()
+        {
+            if (_grabCts != null)
+            {
+                _grabCts.Cancel();
+                _grabCts.Dispose();
+                _grabCts = null;
+            }
+
+            if (_grabTask != null)
+            {
+                try
+                {
+                    _grabTask.Wait(2000);
+                }
+                catch { }
+
+                _grabTask = null;
+            }
+
+            if (_state == DeviceState.Grabbing)
+                _state = DeviceState.Connected;
+        }
+
+        public bool SetAutoExposure(bool enable, double targetBrightness = 128.0)
+        {
+            if (!_isOpen) return false;
+
+            try
+            {
+                SetEnum("ExposureAuto", enable ? 1UL : 0UL);
+                CameraLogger.Info(nameof(DahuaCamera), $"自动曝光 {(enable ? "启用" : "禁用")}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CameraLogger.Error(nameof(DahuaCamera), "设置自动曝光失败", ex);
+                OnError?.Invoke("设置自动曝光失败", ex);
+                return false;
+            }
+        }
+
+        public bool SetAutoGain(bool enable)
+        {
+            if (!_isOpen) return false;
+
+            try
+            {
+                SetEnum("GainAuto", enable ? 1UL : 0UL);
+                CameraLogger.Info(nameof(DahuaCamera), $"自动增益 {(enable ? "启用" : "禁用")}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CameraLogger.Error(nameof(DahuaCamera), "设置自动增益失败", ex);
+                OnError?.Invoke("设置自动增益失败", ex);
+                return false;
+            }
+        }
+
+        public bool SetBalanceRatioAuto(bool enable)
+        {
+            if (!_isOpen) return false;
+
+            try
+            {
+                SetEnum("BalanceWhiteAuto", enable ? 1UL : 0UL);
+                CameraLogger.Info(nameof(DahuaCamera), $"自动白平衡 {(enable ? "启用" : "禁用")}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CameraLogger.Error(nameof(DahuaCamera), "设置自动白平衡失败", ex);
+                OnError?.Invoke("设置自动白平衡失败", ex);
+                return false;
+            }
+        }
+
+        public Dictionary<string, string> GetCameraInfo()
+        {
+            var info = new Dictionary<string, string>();
+
+            if (!_isOpen) return info;
+
+            try
+            {
+                info["ModelName"] = GetString("DeviceModelName") ?? "Unknown";
+                info["SerialNumber"] = SerialNumber;
+                info["VendorName"] = VendorName;
+                info["FirmwareVersion"] = GetString("DeviceFirmwareVersion") ?? "Unknown";
+                info["ManufacturerInfo"] = GetString("DeviceManufacturerInfo") ?? "Unknown";
+                info["Width"] = Width.ToString();
+                info["Height"] = Height.ToString();
+            }
+            catch (Exception ex)
+            {
+                CameraLogger.Warning(nameof(DahuaCamera), $"获取相机信息部分失败: {ex.Message}");
+            }
+
+            return info;
+        }
+
+        private string? GetString(string name)
+        {
+            if (!_isOpen) return null;
+
+            try
+            {
+                var sb = new System.Text.StringBuilder(256);
+                int ret = DahuaInterop.IMV_GetStringFeatureValue(_handle, name, sb, (uint)sb.Capacity);
+                return ret == (int)DahuaInterop.IMV_OK ? sb.ToString() : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public bool GrabOne(IntPtr buffer, int bufferSize, int timeoutMs, out int width, out int height, out int pixelFormat)
         {
             width = 0;
@@ -154,6 +345,16 @@ namespace DahuaGrab
             {
                 DahuaInterop.IMV_ReleaseImage(_handle, ref frame);
             }
+        }
+
+        private bool GrabOneInternal(out ImageData frame, int timeoutMs = 5000)
+        {
+            frame = default;
+
+            if (!_isOpen) throw new CameraException("相机未打开");
+
+            int ret = DahuaInterop.IMV_GetImage(_handle, out frame, (uint)timeoutMs);
+            return ret == (int)DahuaInterop.IMV_OK;
         }
 
         private void SetDouble(string name, double value)

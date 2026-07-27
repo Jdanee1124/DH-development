@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using CameraSDK;
 
 namespace DahuaGrab
 {
@@ -71,6 +72,10 @@ namespace DahuaGrab
         [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
         public static extern int IMV_GetIntFeatureValue(IntPtr pHandle, string pFeatureName, out long pValue);
 
+        // GenICam 参数 - String
+        [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+        public static extern int IMV_GetStringFeatureValue(IntPtr pHandle, string pFeatureName, System.Text.StringBuilder pValue, uint bufSize);
+
         // 设备信息
         [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
         public static extern int IMV_GetDeviceInfo(IntPtr pHandle, out DeviceInfo pInfo);
@@ -88,21 +93,6 @@ namespace DahuaGrab
         public const uint InterfaceType_GigE = 0x1;
         public const uint InterfaceType_USB = 0x2;
         public const uint InterfaceType_All = 0xFFFFFFFF;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 8)]
-    public struct ImageData
-    {
-        public IntPtr pData;
-        public uint dataSize;
-        public uint width;
-        public uint height;
-        public uint pixelFormat;
-        public ulong timeStamp;
-        public uint frameCount;
-        public uint channelId;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
-        public byte[] reserved;
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 8)]

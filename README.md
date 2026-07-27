@@ -8,13 +8,18 @@ DIAVision 平台的大华工业相机采集算子插件，支持 GigE / USB3 Vis
 - 曝光时间、增益参数调节
 - 连续采集 / 软触发 / 硬触发模式
 - 单帧采集（GrabOne）
+- 图像保存（BMP/JPG/PNG）
+- 自动曝光 / 自动增益 / 自动白平衡
+- 相机信息读取（型号、固件版本）
+- 带重试机制的连接（3次重试，指数退避）
+- 文件日志记录（按日期自动归档）
 - XML 序列化支持
 
 ## 环境要求
 
 - .NET 8.0
 - DIAVision 1.6.x（需提供 `DIAVision.Core.dll`）
-- 大华工业相机 SDK（`MVSDKmd.dll` 等原生库，需安装大华 MV Viewer 后复制到 `references/Dahua/`）
+- 大华 MV Viewer（提供原生 SDK DLL）
 
 ## 项目结构
 
@@ -29,19 +34,21 @@ DH-development/
 │   │   └── DahuaGrab.json      # 插件描述文件
 │   └── Shared/Enums/           # 共享相机接口与枚举
 │       ├── ICameraDevice.cs    # 相机统一接口
-│       ├── TriggerMode.cs      # 触发模式/像素格式枚举
-│       ├── CameraException.cs  # 自定义异常
+│       ├── CameraLogger.cs     # 日志 + 重试机制
+│       ├── ImageData.cs        # 图像数据结构
 │       └── CameraSDK.csproj
 ├── tests/
 │   └── DahuaGrab.Tests/        # 单元测试
-├── references/
-│   ├── DIAVision.Core.dll      # DIAVision 核心库
-│   └── Dahua/                  # 大华原生 SDK
-│       ├── MVSDKmd.dll
-│       ├── GenApi_MD_VC120_v3_0.dll
-│       └── ...
 └── DahuaGrab.sln
 ```
+
+## 大华 SDK 位置
+
+SDK 来自大华 MV Viewer 安装目录，需复制以下 DLL 到插件部署目录：
+
+| 源路径 | 文件 |
+|--------|------|
+| `D:\dahua\MV Viewer\Runtime\x64\` | `MVSDKmd.dll`, `GenApi_MD_VC120_v3_0.dll`, `CLAllSerial_MD_VC120_v3_0.dll`, `CLProtocol_MD_VC120_v3_0.dll` |
 
 ## 构建
 
@@ -57,7 +64,17 @@ dotnet build
 CameraSDK.dll
 DahuaGrab.dll
 DahuaGrab.json
-（以及 references/Dahua/ 下的所有原生 DLL）
+MVSDKmd.dll
+GenApi_MD_VC120_v3_0.dll
+CLAllSerial_MD_VC120_v3_0.dll
+CLProtocol_MD_VC120_v3_0.dll
+```
+
+## 日志
+
+运行日志自动写入：
+```
+C:\Users\Public\Documents\DMV-IVS\Plugin\DahuaGrab\logs\camera_YYYYMMDD.log
 ```
 
 ## 使用

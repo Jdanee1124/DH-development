@@ -1,4 +1,6 @@
+using System.IO;
 using System.Xml;
+using CameraSDK;
 using CameraSDK.Enums;
 using DIAVision.Core.CommonTypes;
 using DIAVision.Core.FlowElements;
@@ -15,6 +17,14 @@ namespace DahuaGrab
         private bool _disposed;
         private readonly object _lock = new();
         private readonly List<DahuaCamera> _availableCameras = new();
+
+        static DahuaGrab()
+        {
+            string logDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments),
+                @"DMV-IVS\Plugin\DahuaGrab\logs");
+            CameraLogger.LogDirectory = logDir;
+        }
 
         #region Inputs
 
@@ -65,6 +75,43 @@ namespace DahuaGrab
         [Description("采集超时(ms)")]
         public int Timeout { get => (int)GetInputValue(nameof(Timeout)); }
 
+        [Input]
+        [Category("Grab", 4)]
+        [InitialValue("100")]
+        [Range(10, 10000, RangeMode.Inclusive)]
+        [Description("连续采集间隔(ms)")]
+        public int ContinuousInterval { get => (int)GetInputValue(nameof(ContinuousInterval)); }
+
+        [Input]
+        [Category("Advanced", 5)]
+        [InitialValue("false")]
+        [Description("启用自动曝光")]
+        public bool AutoExposure { get => (bool)GetInputValue(nameof(AutoExposure)); }
+
+        [Input]
+        [Category("Advanced", 5)]
+        [InitialValue("false")]
+        [Description("启用自动增益")]
+        public bool AutoGain { get => (bool)GetInputValue(nameof(AutoGain)); }
+
+        [Input]
+        [Category("Advanced", 5)]
+        [InitialValue("false")]
+        [Description("启用自动白平衡")]
+        public bool AutoWhiteBalance { get => (bool)GetInputValue(nameof(AutoWhiteBalance)); }
+
+        [Input]
+        [Category("Save", 6)]
+        [InitialValue("")]
+        [Description("图像保存路径(为空则不保存)")]
+        public string SavePath { get => (string)GetInputValue(nameof(SavePath)); }
+
+        [Input]
+        [Category("Save", 6)]
+        [InitialValue("BMP")]
+        [Description("图像格式: BMP/JPG/PNG")]
+        public string ImageFormat { get => (string)GetInputValue(nameof(ImageFormat)); }
+
         #endregion
 
         #region Outputs
@@ -94,6 +141,26 @@ namespace DahuaGrab
         [Category("Info", 3)]
         [Description("图像高度")]
         public int ImageHeight { get; private set; }
+
+        [Output]
+        [Category("Status", 2)]
+        [Description("是否正在连续采集")]
+        public bool IsGrabbing { get; private set; }
+
+        [Output]
+        [Category("Info", 3)]
+        [Description("相机型号")]
+        public string CameraModel { get; private set; } = string.Empty;
+
+        [Output]
+        [Category("Info", 3)]
+        [Description("固件版本")]
+        public string FirmwareVersion { get; private set; } = string.Empty;
+
+        [Output]
+        [Category("Info", 3)]
+        [Description("最后保存的图像路径")]
+        public string LastSavedPath { get; private set; } = string.Empty;
 
         #endregion
 
@@ -206,14 +273,171 @@ namespace DahuaGrab
             }
         }
 
+        [Command]
+        [Description("开始连续采集")]
+        public bool StartContinuousGrab()
+        {
+            try
+            {
+                if (_camera == null || !_camera.IsOpen)
+                {
+                    ErrorMessage = "相机未连接";
+                    return false;
+                }
+
+                _camera.OnFrameCaptured += OnFrameCaptured;
+                _camera.OnError += OnCameraError;
+
+                bool result = _camera.StartContinuousGrab(ContinuousInterval);
+                IsGrabbing = result;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"开始连续采集失败: {ex.Message}";
+                return false;
+            }
+        }
+
+        [Command]
+        [Description("停止连续采集")]
+        public bool StopContinuousGrab()
+        {
+            try
+            {
+                if (_camera != null)
+                {
+                    _camera.OnFrameCaptured -= OnFrameCaptured;
+                    _camera.OnError -= OnCameraError;
+                    _camera.StopContinuousGrab();
+                }
+                IsGrabbing = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"停止连续采集失败: {ex.Message}";
+                return false;
+            }
+        }
+
+        [Command]
+        [Description("获取相机信息")]
+        public bool GetCameraInfoCommand()
+        {
+            try
+            {
+                if (_camera == null || !_camera.IsOpen)
+                {
+                    ErrorMessage = "相机未连接";
+                    return false;
+                }
+
+                var info = _camera.GetCameraInfo();
+                CameraModel = info.ContainsKey("ModelName") ? info["ModelName"] : "Unknown";
+                FirmwareVersion = info.ContainsKey("FirmwareVersion") ? info["FirmwareVersion"] : "Unknown";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"获取相机信息失败: {ex.Message}";
+                return false;
+            }
+        }
+
+        [Command]
+        [Description("保存当前图像")]
+        public bool SaveImage()
+        {
+            try
+            {
+                if (_imageBuffer == null || !GrabSuccess)
+                {
+                    ErrorMessage = "没有可保存的图像";
+                    return false;
+                }
+
+                string savePath = SavePath;
+                if (string.IsNullOrEmpty(savePath))
+                {
+                    savePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+                        $"DahuaGrab_{DateTime.Now:yyyyMMdd_HHmmss}.{ImageFormat.ToLower()}");
+                }
+
+                string dir = Path.GetDirectoryName(savePath) ?? "";
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                string ext = ImageFormat.ToLower();
+                string filePath = Path.ChangeExtension(savePath, ext);
+
+                if (File.Exists(filePath))
+                {
+                    string nameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+                    string dirPath = Path.GetDirectoryName(filePath) ?? "";
+                    filePath = Path.Combine(dirPath, $"{nameWithoutExt}_{DateTime.Now:yyyyMMdd_HHmmss}.{ext}");
+                }
+
+                _imageBuffer.Save(filePath);
+                LastSavedPath = filePath;
+                CameraLogger.Info(nameof(DahuaGrab), $"图像已保存: {filePath}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"保存图像失败: {ex.Message}";
+                CameraLogger.Error(nameof(DahuaGrab), "保存图像失败", ex);
+                return false;
+            }
+        }
+
+        private void OnFrameCaptured(ImageData frame)
+        {
+            try
+            {
+                if (_imageBuffer == null || _imageBuffer.Width != (int)frame.width || _imageBuffer.Height != (int)frame.height)
+                {
+                    _imageBuffer?.Dispose();
+                    _imageBuffer = new Image();
+                    _imageBuffer.Allocate((int)frame.width, (int)frame.height, 8);
+                }
+
+                int bufSize = _imageBuffer.Width * _imageBuffer.Height * 3;
+                int copySize = Math.Min((int)frame.dataSize, bufSize);
+                if (frame.pData != IntPtr.Zero && copySize > 0)
+                    unsafe { Buffer.MemoryCopy((void*)frame.pData, (void*)_imageBuffer.Bits, bufSize, copySize); }
+
+                ImageWidth = (int)frame.width;
+                ImageHeight = (int)frame.height;
+                GrabSuccess = true;
+
+                if (!string.IsNullOrEmpty(SavePath))
+                    SaveImage();
+            }
+            catch (Exception ex)
+            {
+                CameraLogger.Error(nameof(DahuaGrab), "处理帧数据失败", ex);
+            }
+        }
+
+        private void OnCameraError(string message, Exception ex)
+        {
+            ErrorMessage = message;
+            CameraLogger.Error(nameof(DahuaGrab), message, ex);
+        }
+
         #endregion
 
         protected override IReadOnlyList<string> GetDynamicValueNames(string inputName)
         {
             if (inputName == nameof(CameraSerialNumber))
             {
-                if (_availableCameras.Count == 0)
-                    ScanCameras();
+                try
+                {
+                    if (_availableCameras.Count == 0)
+                        ScanCameras();
+                }
+                catch { }
 
                 return _availableCameras
                     .Select(c => $"\"{c.SerialNumber}\"")
@@ -227,8 +451,13 @@ namespace DahuaGrab
         {
             if (inputName == nameof(CameraSerialNumber))
             {
-                if (_availableCameras.Count == 0)
-                    ScanCameras();
+                try
+                {
+                    if (_availableCameras.Count == 0)
+                        ScanCameras();
+                }
+                catch { }
+
                 return _availableCameras.FirstOrDefault()?.SerialNumber ?? "";
             }
             return base.GetDynamicInitialValue(inputName);
@@ -275,6 +504,10 @@ namespace DahuaGrab
                 ImageWidth = w;
                 ImageHeight = h;
                 GrabSuccess = true;
+
+                if (!string.IsNullOrEmpty(SavePath))
+                    SaveImage();
+
                 return true;
             }
             catch (Exception ex)
@@ -293,6 +526,10 @@ namespace DahuaGrab
             _camera.TriggerMode = (CameraSDK.Enums.TriggerMode)TriggerMode;
             _camera.TriggerSource = (CameraSDK.Enums.TriggerSource)TriggerSource;
             _camera.PulseWidth = PulseWidth;
+
+            if (AutoExposure) _camera.SetAutoExposure(true);
+            if (AutoGain) _camera.SetAutoGain(true);
+            if (AutoWhiteBalance) _camera.SetBalanceRatioAuto(true);
         }
 
         public override void SaveCustomData(XmlWriter writer, string folderPath)
@@ -330,6 +567,7 @@ namespace DahuaGrab
             if (_disposed) return;
             if (disposing)
             {
+                StopContinuousGrab();
                 Disconnect();
                 _imageBuffer?.Dispose();
                 foreach (var cam in _availableCameras)

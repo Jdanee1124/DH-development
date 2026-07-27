@@ -1,3 +1,4 @@
+using CameraSDK;
 using Xunit;
 
 namespace DahuaGrab.Tests
