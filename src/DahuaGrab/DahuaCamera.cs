@@ -18,6 +18,8 @@ namespace DahuaGrab
         private CancellationTokenSource? _grabCts;
         private Task? _grabTask;
 
+        private DeviceInfo _deviceInfo;
+
         public string Name { get; }
         public string SerialNumber { get; }
         public string VendorName { get; }
@@ -61,7 +63,35 @@ namespace DahuaGrab
             VendorName = vendorName;
         }
 
-        internal void SetHandle(IntPtr handle) => _handle = handle;
+        internal void SetDeviceInfo(DeviceInfo info) => _deviceInfo = info;
+
+        private bool CreateHandle()
+        {
+            DestroyHandle();
+            IntPtr pDeviceInfo = Marshal.AllocHGlobal(Marshal.SizeOf<DeviceInfo>());
+            try
+            {
+                Marshal.StructureToPtr(_deviceInfo, pDeviceInfo, false);
+                int ret = DahuaInterop.IMV_CreateHandle(out IntPtr pHandle, DahuaInterop.HandleType_Device, pDeviceInfo);
+                if (ret != (int)DahuaInterop.IMV_OK)
+                    return false;
+                _handle = pHandle;
+                return true;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pDeviceInfo);
+            }
+        }
+
+        private void DestroyHandle()
+        {
+            if (_handle != IntPtr.Zero)
+            {
+                try { DahuaInterop.IMV_DestroyHandle(_handle); } catch { }
+                _handle = IntPtr.Zero;
+            }
+        }
 
         public bool Open()
         {
@@ -73,9 +103,19 @@ namespace DahuaGrab
                 lock (_lock)
                 {
                     CameraLogger.Info(nameof(DahuaCamera), $"正在打开相机 {SerialNumber}...");
+
+                    if (!CreateHandle())
+                        throw new CameraException("创建相机句柄失败");
+
                     int ret = DahuaInterop.IMV_OpenDev(_handle);
                     if (ret != (int)DahuaInterop.IMV_OK)
-                        throw new CameraException($"打开相机失败: 0x{ret:X8}", ret);
+                    {
+                        DestroyHandle();
+                        string msg = (ret == unchecked((int)0x80000003) || ret == unchecked((int)0x80000004))
+                            ? $"相机已被其他程序占用: 0x{ret:X8}"
+                            : $"打开相机失败: 0x{ret:X8}";
+                        throw new CameraException(msg, ret);
+                    }
 
                     _isOpen = true;
                     _state = DeviceState.Connected;
@@ -412,11 +452,7 @@ namespace DahuaGrab
         {
             if (_disposed) return;
             Close();
-            if (_handle != IntPtr.Zero)
-            {
-                DahuaInterop.IMV_DestroyHandle(_handle);
-                _handle = IntPtr.Zero;
-            }
+            DestroyHandle();
             _disposed = true;
         }
     }
@@ -442,13 +478,8 @@ namespace DahuaGrab
                     var info = Marshal.PtrToStructure<DeviceInfo>(pDeviceInfo);
 
                     var camera = new DahuaCamera(info.cameraName, info.serialNumber, info.vendorName);
-
-                    ret = DahuaInterop.IMV_CreateHandle(out IntPtr pHandle, DahuaInterop.HandleType_Device, pDeviceInfo);
-                    if (ret == (int)DahuaInterop.IMV_OK)
-                    {
-                        camera.SetHandle(pHandle);
-                        cameras.Add(camera);
-                    }
+                    camera.SetDeviceInfo(info);
+                    cameras.Add(camera);
                 }
             }
             finally
